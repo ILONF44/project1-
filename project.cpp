@@ -408,3 +408,231 @@ void updateWifiSetup(void) {
   }
 
 }
+
+void handleRoot(void) {
+  server.send(200, "text/html", index_html);
+}
+
+void handleCommandWeb(void) {
+  char value[24];
+
+  if (server.hasArg("pose") || server.hasArg("go")) {
+
+    getArg(server.hasArg("pose") ? "pose" : "go", value, sizeof(value));
+    setCommand(value);
+    recordInput();
+    exitIdle();
+    server.send(200, "text/plain", "OK");
+  }
+
+  else if (server.hasArg("stop")) {
+    clearCommand();
+    recordInput();
+    server.send(200, "text/plain", "OK");
+  }
+
+  else if (server.hasArg("motor") && server.hasArg("value")) {
+    char motorText[8];
+    getArg("motor", motorText, sizeof(motorText));
+    int motorNum = atoi(motorText);
+    int servoIdx = servoNameToIndex(motorText);
+    int angle    = getArgInt("value");
+
+    if (angle < 0 || angle > 180) {
+      server.send(400, "text/plain", "Invalid motor or angle");
+    } else if (motorNum >= 1 && motorNum <= SERVO_COUNT) {
+      setServoAngle(motorNum - 1, angle);
+      recordInput();
+      server.send(200, "text/plain", "OK");
+    } else if (servoIdx != -1) {
+      setServoAngle(servoIdx, angle);
+      recordInput();
+      server.send(200, "text/plain", "OK");
+    } else {
+      server.send(400, "text/plain", "Invalid motor or angle");
+    }
+  }
+
+  else {
+    server.send(400, "text/plain", "Bad Args");
+  }
+}
+
+void handleGetSettings(void) {
+  char json[128];
+
+  snprintf(json, sizeof(json),
+           "{\"frameDelay\":%d,\"walkCycles\":%d,\"motorCurrentDelay\":%d,\"faceFps\":%d}",
+           frameDelay, walkCycles, motorCurrentDelay, faceFps);
+  sendJson(200, json);
+}
+
+void handleSetSettings(void) {
+  if (server.hasArg("frameDelay"))        frameDelay        = constrain(getArgInt("frameDelay"), 10, 2000);
+  if (server.hasArg("walkCycles"))        walkCycles        = constrain(getArgInt("walkCycles"), 1, 100);
+  if (server.hasArg("motorCurrentDelay")) motorCurrentDelay = constrain(getArgInt("motorCurrentDelay"), 0, 500);
+  if (server.hasArg("faceFps"))           faceFps           = constrain(getArgInt("faceFps"), 1, 30);
+  server.send(200, "text/plain", "OK");
+}
+
+void handleGetStatus(void) {
+  char json[256];
+  size_t pos = 0;
+  char ip[16];
+
+  ipToText(WiFi.softAPIP(), ip, sizeof(ip));
+
+  appendText(json, sizeof(json), &pos,
+             "{\"currentCommand\":\"%s\",\"currentFace\":\"%s\",\"networkConnected\":%s,\"apIP\":\"%s\"",
+             currentCommand, currentFaceName, networkConnected ? "true" : "false", ip);
+  if (networkConnected) {
+    ipToText(networkIP, ip, sizeof(ip));
+    appendText(json, sizeof(json), &pos, ",\"networkIP\":\"%s\"", ip);
+  }
+  appendText(json, sizeof(json), &pos, "}");
+  sendJson(200, json);
+}
+
+void handleApiCommand(void) {
+  if (server.method() != HTTP_POST) {
+    sendJson(405, "{\"error\":\"Method not allowed\"}");
+    return;
+  }
+
+  char body[256];
+  char command[24] = "";
+  char face[24]    = "";
+  getArg("plain", body, sizeof(body));
+  Serial.printf("API Command received: %s\n", body);
+
+  bool hasFace         = jsonGetString(body, "face", face, sizeof(face));
+  bool hasCommandField = (strstr(body, "\"command\"") != NULL);
+
+  if (!hasFace && !hasCommandField) {
+    sendJson(400, "{\"error\":\"Missing command field\"}");
+    return;
+  }
+
+  if (hasCommandField && !jsonGetString(body, "command", command, sizeof(command))) {
+    sendJson(400, "{\"error\":\"Invalid command format\"}");
+    return;
+  }
+
+  if (hasFace) {
+    if (!hasCommandField) exitIdle();
+    setFace(face);
+  }
+  recordInput();
+
+  if (!hasCommandField) {
+    sendJson(200, "{\"status\":\"ok\",\"message\":\"Face updated\"}");
+  } else if (strcmp(command, "stop") == 0) {
+    clearCommand();
+    sendJson(200, "{\"status\":\"ok\",\"message\":\"Command stopped\"}");
+  } else {
+    setCommand(command);
+    exitIdle();
+    sendJson(200, "{\"status\":\"ok\",\"message\":\"Command executed\"}");
+  }
+}
+
+void handleWifiScan(void) {
+
+  int n = WiFi.scanComplete();
+
+  if (n == WIFI_SCAN_RUNNING) {
+    sendJson(200, "{\"scanning\":true}");
+    return;
+  }
+  if (n < 0) {
+    if (wifiSetupState == WIFI_SETUP_IDLE) {
+      if (WiFi.getMode() == WIFI_AP) {
+        WiFi.mode(WIFI_AP_STA);
+        wifiRestoreApOnly = true;
+      }
+      WiFi.scanNetworks(true);
+    }
+    sendJson(200, "{\"scanning\":true}");
+    return;
+  }
+
+  static char json[3072];
+  size_t pos = 0;
+  char ssid[200];
+
+  appendText(json, sizeof(json), &pos, "[");
+  for (int i = 0; i < n; i++) {
+    if (sizeof(json) - pos < 260) break;
+    jsonEscape(ssid, sizeof(ssid), WiFi.SSID(i).c_str());
+
+    appendText(json, sizeof(json), &pos, "%s{\"ssid\":\"%s\",\"rssi\":%d,\"secure\":%s}",
+               (i > 0) ? "," : "", ssid, (int)WiFi.RSSI(i),
+               (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "false" : "true");
+  }
+  appendText(json, sizeof(json), &pos, "]");
+  WiFi.scanDelete();
+
+  if (wifiRestoreApOnly && wifiSetupState == WIFI_SETUP_IDLE && WiFi.status() != WL_CONNECTED) {
+    WiFi.mode(WIFI_AP);
+  }
+  wifiRestoreApOnly = false;
+  sendJson(200, json);
+}
+
+void handleWifiConnect(void) {
+  if (server.method() != HTTP_POST) {
+    sendJson(405, "{\"success\":false,\"error\":\"Method not allowed\"}");
+    return;
+  }
+  if (server.arg("ssid").length() == 0) {
+    sendJson(400, "{\"success\":false,\"error\":\"SSID required\"}");
+    return;
+  }
+  if (wifiSetupState != WIFI_SETUP_IDLE) {
+    sendJson(409, "{\"success\":false,\"error\":\"Connection attempt already in progress\"}");
+    return;
+  }
+
+  getArg("ssid", wifiSetupSsid, sizeof(wifiSetupSsid));
+  getArg("password", wifiSetupPass, sizeof(wifiSetupPass));
+  wifiSetupError[0] = '\0';
+  wifiSetupQueuedMs = millis();
+  wifiSetupState    = WIFI_SETUP_QUEUED;
+  wifiRestoreApOnly = false;
+  sendJson(200, "{\"success\":true,\"pending\":true}");
+}
+
+void handleWifiStatus(void) {
+  char json[384];
+  char text[200];
+  size_t pos = 0;
+  bool connected = (WiFi.status() == WL_CONNECTED);
+
+  appendText(json, sizeof(json), &pos, "{\"connected\":%s,\"connecting\":%s",
+             connected ? "true" : "false",
+             (wifiSetupState != WIFI_SETUP_IDLE) ? "true" : "false");
+
+  if (wifiSetupError[0] != '\0') {
+    jsonEscape(text, sizeof(text), wifiSetupError);
+    appendText(json, sizeof(json), &pos, ",\"lastError\":\"%s\"", text);
+  }
+  if (connected) {
+    char ip[16];
+    jsonEscape(text, sizeof(text), WiFi.SSID().c_str());
+    ipToText(WiFi.localIP(), ip, sizeof(ip));
+    appendText(json, sizeof(json), &pos,
+               ",\"ssid\":\"%s\",\"ip\":\"%s\",\"host\":\"%s.local\",\"mdns\":%s,\"rssi\":%d",
+               text, ip, DEVICE_HOSTNAME, mdnsOk ? "true" : "false", (int)WiFi.RSSI());
+  }
+  appendText(json, sizeof(json), &pos, "}");
+  sendJson(200, json);
+}
+
+void handleNotFound(void) {
+
+  if (strncmp(server.uri().c_str(), "/api/", 5) == 0) {
+    sendJson(404, "{\"error\":\"Not found\"}");
+    return;
+  }
+  handleRoot();
+}

@@ -267,3 +267,144 @@ int getArgInt(const char* name) {
 void sendJson(int code, const char* json) {
   server.send(code, "application/json", json);
 }
+
+bool startMdns(void) {
+  mdnsOk = MDNS.begin(DEVICE_HOSTNAME);
+  if (mdnsOk) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.printf("mDNS started: http://%s.local\n", DEVICE_HOSTNAME);
+  } else {
+    Serial.println("Error setting up mDNS responder!");
+  }
+  return mdnsOk;
+}
+
+void announceNetwork(const char* ssid) {
+  char apIp[16], netIp[16];
+  MDNS.end();
+  startMdns();
+  ipToText(WiFi.softAPIP(), apIp, sizeof(apIp));
+  ipToText(networkIP, netIp, sizeof(netIp));
+
+  snprintf(wifiInfoText, sizeof(wifiInfoText),
+           "AP: %s (%s)  |  Network: %s (%s) or %s.local  |  ",
+           AP_SSID, apIp, ssid, netIp, DEVICE_HOSTNAME);
+}
+
+void setApOnlyInfoText(void) {
+  char apIp[16];
+  ipToText(WiFi.softAPIP(), apIp, sizeof(apIp));
+  snprintf(wifiInfoText, sizeof(wifiInfoText),
+           "Connect to WiFi: %s  |  Pass: %s  |  IP: %s  |  Captive Portal will auto-open!  |  ",
+           AP_SSID, AP_PASS, apIp);
+}
+
+void showWifiInfoNow(void) {
+  firstInputReceived = false;
+  lastInputTime      = millis() - 30000;
+  showingWifiInfo    = false;
+}
+
+bool connectToWifi(const char* ssid, const char* pass, uint32_t timeoutMs) {
+  if (ssid == NULL || ssid[0] == '\0') return false;
+
+  Serial.printf("Connecting to WiFi network: %s\n", ssid);
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.setHostname(DEVICE_HOSTNAME);
+  WiFi.begin(ssid, pass);
+
+  unsigned long start = millis();
+  while (millis() - start < timeoutMs) {
+    wl_status_t st = WiFi.status();
+    if (st == WL_CONNECTED) break;
+
+    if (millis() - start > 1000 && (st == WL_CONNECT_FAILED || st == WL_NO_SSID_AVAIL)) break;
+    delay(250);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi connect failed.");
+    WiFi.disconnect();
+    return false;
+  }
+
+  networkConnected = true;
+  networkIP = WiFi.localIP();
+  char ip[16];
+  ipToText(networkIP, ip, sizeof(ip));
+  Serial.printf("Connected! IP: %s\n", ip);
+  return true;
+}
+
+void finishWifiSetup(const char* err) {
+  copyText(wifiSetupError, sizeof(wifiSetupError), err);
+  memset(wifiSetupPass, 0, sizeof(wifiSetupPass));
+
+  wifiSetupState = WIFI_SETUP_IDLE;
+}
+
+void updateWifiSetup(void) {
+
+  if (wifiSetupState == WIFI_SETUP_IDLE) {
+
+    static unsigned long lastCheckMs = 0;
+    if (millis() - lastCheckMs < 5000) return;
+    lastCheckMs = millis();
+
+    bool live = (WiFi.status() == WL_CONNECTED);
+    if (live != networkConnected) {
+      networkConnected = live;
+      if (live) {
+        networkIP = WiFi.localIP();
+        announceNetwork(WiFi.SSID().c_str());
+      } else {
+        Serial.println("Station link lost.");
+      }
+    }
+    return;
+  }
+
+  if (wifiSetupState == WIFI_SETUP_QUEUED) {
+
+    if (millis() - wifiSetupQueuedMs < WIFI_SETUP_START_DELAY_MS) return;
+    Serial.printf("Connecting to WiFi network: %s\n", wifiSetupSsid);
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.setHostname(DEVICE_HOSTNAME);
+    WiFi.begin(wifiSetupSsid, wifiSetupPass);
+    wifiSetupStartMs = millis();
+    wifiSetupState   = WIFI_SETUP_CONNECTING;
+    return;
+  }
+
+  wl_status_t st = WiFi.status();
+  if (st == WL_CONNECTED) {
+    networkConnected = true;
+    networkIP = WiFi.localIP();
+    char ip[16];
+    ipToText(networkIP, ip, sizeof(ip));
+    Serial.printf("Connected! IP: %s\n", ip);
+    announceNetwork(wifiSetupSsid);
+    showWifiInfoNow();
+    finishWifiSetup("");
+    return;
+  }
+
+  bool terminal = (millis() - wifiSetupStartMs > 1000) &&
+                  (st == WL_CONNECT_FAILED || st == WL_NO_SSID_AVAIL);
+
+  if (terminal || millis() - wifiSetupStartMs >= WIFI_CONNECT_TIMEOUT_MS) {
+    const char* err;
+    if (st == WL_NO_SSID_AVAIL)       err = "Network not found";
+    else if (st == WL_CONNECT_FAILED) err = "Wrong password or connection rejected";
+    else                              err = "Connection timed out";
+
+    Serial.printf("WiFi connect failed: %s\n", err);
+    WiFi.disconnect();
+    networkConnected = false;
+    setApOnlyInfoText();
+    finishWifiSetup(err);
+  }
+
+}

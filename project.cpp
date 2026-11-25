@@ -190,3 +190,80 @@ void handleWifiConnect(void);
 void handleWifiStatus(void);
 void handleNotFound(void);
 void sendJson(int code, const char* json);
+
+void copyText(char* dst, size_t size, const char* src) {
+  if (size == 0) return;
+  if (src == NULL) src = "";
+  strncpy(dst, src, size - 1);
+  dst[size - 1] = '\0';
+}
+
+void appendText(char* buf, size_t size, size_t* pos, const char* fmt, ...) {
+  if (*pos >= size - 1) return;
+  va_list args;
+  va_start(args, fmt);
+
+  int written = vsnprintf(buf + *pos, size - *pos, fmt, args);
+  va_end(args);
+  if (written < 0) return;
+  *pos += (size_t)written;
+  if (*pos > size - 1) *pos = size - 1;
+}
+
+void jsonEscape(char* out, size_t size, const char* in) {
+  size_t o = 0;
+
+  for (; *in != '\0' && o + 7 < size; in++) {
+    unsigned char c = (unsigned char)*in;
+    if (c == '\\' || c == '"') {
+      out[o++] = '\\';
+      out[o++] = (char)c;
+    } else if (c < 0x20) {
+      o += snprintf(out + o, size - o, "\\u%04x", c);
+    } else {
+      out[o++] = (char)c;
+    }
+  }
+  out[o] = '\0';
+}
+
+bool jsonGetString(const char* json, const char* key, char* out, size_t size) {
+  char pattern[40];
+  snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+
+  const char* p = strstr(json, pattern);
+  if (p == NULL) return false;
+  p += strlen(pattern);
+
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+  if (*p != ':') return false;
+  p++;
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+  if (*p != '"') return false;
+  p++;
+
+  size_t i = 0;
+
+  while (*p != '\0' && *p != '"' && i < size - 1) {
+    out[i++] = *p++;
+  }
+  out[i] = '\0';
+  return (*p == '"');
+}
+
+void ipToText(IPAddress ip, char* out, size_t size) {
+  snprintf(out, size, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+}
+
+void getArg(const char* name, char* out, size_t size) {
+
+  copyText(out, size, server.arg(name).c_str());
+}
+
+int getArgInt(const char* name) {
+  return atoi(server.arg(name).c_str());
+}
+
+void sendJson(int code, const char* json) {
+  server.send(code, "application/json", json);
+}
